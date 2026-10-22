@@ -85,6 +85,10 @@ class FontBook:
         self._pil_fonts: dict[tuple[str, int], Any] = {}
         self._width_tables: dict[tuple[str, int], dict[str, float]] = {}
         self._metrics: dict[tuple[str, int], tuple[float, float]] = {}
+        # The scale search re-measures the same strings at the same sizes many
+        # times, so font lookups and per-string widths are memoized.
+        self._paths: dict[tuple[str, bool, bool], Optional[Path]] = {}
+        self._str_widths: dict[tuple[str, bool, bool, int, str], list[float]] = {}
 
     def _scan(self, d: Path) -> None:
         for p in sorted(d.iterdir()):
@@ -98,6 +102,12 @@ class FontBook:
             self.by_family.setdefault(fam, []).append((bold, italic, p))
 
     def path(self, family: str, bold: bool, italic: bool) -> Optional[Path]:
+        key = (family, bold, italic)
+        if key not in self._paths:
+            self._paths[key] = self._find_path(family, bold, italic)
+        return self._paths[key]
+
+    def _find_path(self, family: str, bold: bool, italic: bool) -> Optional[Path]:
         cands = self.by_family.get(_norm_family(family))
         if not cands:
             if not self.by_family:
@@ -124,7 +134,16 @@ class FontBook:
         return f
 
     def char_widths(self, family: str, bold: bool, italic: bool, size: int, text: str) -> list[float]:
+        """Per-character advances. The returned list is shared: read it, don't modify it."""
         size = max(1, int(size))
+        key = (family, bold, italic, size, text)
+        widths = self._str_widths.get(key)
+        if widths is None:
+            widths = self._char_widths(family, bold, italic, size, text)
+            self._str_widths[key] = widths
+        return widths
+
+    def _char_widths(self, family: str, bold: bool, italic: bool, size: int, text: str) -> list[float]:
         path = self.path(family, bold, italic)
         if path is None or (skia is None and ImageFont is None):
             return [self._fallback_width(c, size) for c in text]
@@ -331,6 +350,23 @@ def contrast_ratio(l1: float, l2: float) -> float:
 # never writes or alters them.
 # ----------------------------------------------------------------------------
 
+# Background analysis is read-only and depends only on (asset, canvas, fit),
+# so decoded images and finished maps are reused across tasks.
+_BG_CACHE: dict[tuple, tuple[list[list[float]], list[list[float]]]] = {}
+_RGB_CACHE: dict[str, Any] = {}
+
+
+def _load_rgb(path: Path):
+    im = _RGB_CACHE.get(str(path))
+    if im is None:
+        with Image.open(path) as src:
+            im = src.convert("RGB")
+        if len(_RGB_CACHE) >= 4:
+            _RGB_CACHE.clear()
+        _RGB_CACHE[str(path)] = im
+    return im
+
+
 class BgMap:
     GRID = 48  # cells along the long side
 
@@ -375,9 +411,20 @@ class BgMap:
         path = self._asset_path(str(top.raw.get("asset_id", "")))
         if path is None:
             return
-        im = Image.open(path).convert("RGB")
-        iw, ih = im.size
         fit = top.raw.get("fit", "cover")
+        key = (str(path), self.TW, self.TH, fit)
+        cached = _BG_CACHE.get(key)
+        if cached is None:
+            cached = self._analyze(path, fit)
+            if len(_BG_CACHE) > 64:
+                _BG_CACHE.clear()
+            _BG_CACHE[key] = cached
+        self.lum, self.busy = cached
+        self.ok = True
+
+    def _analyze(self, path: Path, fit: str) -> tuple[list[list[float]], list[list[float]]]:
+        im = _load_rgb(path)
+        iw, ih = im.size
         if fit == "cover":  # the renderer's centred cover crop
             crop_w = min(iw, ih * self.TW / self.TH)
             crop_h = min(ih, iw * self.TH / self.TW)
@@ -388,22 +435,23 @@ class BgMap:
         small = im.resize((aw, ah), Image.BILINEAR)
         lum_img = small.convert("L")
         edges = lum_img.filter(ImageFilter.FIND_EDGES)
-        lum_px = lum_img.load()
-        edge_px = edges.load()
-        self.lum = [[0.0] * self.gw for _ in range(self.gh)]
-        self.busy = [[0.0] * self.gw for _ in range(self.gh)]
+        # One bulk read instead of per-pixel access; same summation order.
+        lum_px = [v / 255.0 for v in lum_img.tobytes()]
+        edge_px = [v / 255.0 for v in edges.tobytes()]
+        lum = [[0.0] * self.gw for _ in range(self.gh)]
+        busy = [[0.0] * self.gw for _ in range(self.gh)]
         for gy in range(self.gh):
             for gx in range(self.gw):
                 acc_l = 0.0
                 acc_e = 0.0
                 for yy in range(gy * 4, gy * 4 + 4):
-                    for xx in range(gx * 4, gx * 4 + 4):
-                        v = lum_px[xx, yy] / 255.0
-                        acc_l += v
-                        acc_e += edge_px[xx, yy] / 255.0
-                self.lum[gy][gx] = rel_luminance((acc_l / 16 * 255,) * 3)
-                self.busy[gy][gx] = min(1.0, acc_e / 16 * 3.0)
-        self.ok = True
+                    row = yy * aw
+                    for xx in range(gx * 4 + row, gx * 4 + 4 + row):
+                        acc_l += lum_px[xx]
+                        acc_e += edge_px[xx]
+                lum[gy][gx] = rel_luminance((acc_l / 16 * 255,) * 3)
+                busy[gy][gx] = min(1.0, acc_e / 16 * 3.0)
+        return lum, busy
 
     def sample(self, box: Box) -> tuple[float, float]:
         """Mean (luminance, busyness) of the background under `box`."""
@@ -537,9 +585,24 @@ class TextFit:
         return self.top_off + self.painted_h
 
 
+_FIT_CACHE: dict[tuple, TextFit] = {}
+_WORD_CACHE: dict[tuple, float] = {}
+
+
 def measure_text(el: El, fs: int, box_w: float) -> TextFit:
-    fb = fonts()
+    """Wrap and measure `el` at `fs` in a box `box_w` wide. Results are cached
+    and shared, so callers must treat the returned TextFit as read-only."""
     fs = max(1, int(fs))
+    key = (el.content, el.family, el.bold, el.italic, el.lh, _num(el.raw.get("letter_spacing"), 0.0), fs, box_w)
+    fit = _FIT_CACHE.get(key)
+    if fit is None:
+        fit = _measure_text(el, fs, box_w)
+        _FIT_CACHE[key] = fit
+    return fit
+
+
+def _measure_text(el: El, fs: int, box_w: float) -> TextFit:
+    fb = fonts()
     widths = fb.char_widths(el.family, el.bold, el.italic, fs, el.content)
     lines = wrap_lines(el.content, widths, box_w)
     ls = _num(el.raw.get("letter_spacing"), 0.0)
@@ -556,6 +619,14 @@ def measure_text(el: El, fs: int, box_w: float) -> TextFit:
 
 
 def _word_widths(el: El, fs: int, split_spaces: bool) -> float:
+    key = (el.content, el.family, el.bold, el.italic, _num(el.raw.get("letter_spacing"), 0.0), fs, split_spaces)
+    w = _WORD_CACHE.get(key)
+    if w is None:
+        w = _WORD_CACHE[key] = _word_widths_uncached(el, fs, split_spaces)
+    return w
+
+
+def _word_widths_uncached(el: El, fs: int, split_spaces: bool) -> float:
     widths = fonts().char_widths(el.family, el.bold, el.italic, fs, el.content)
     ls = _num(el.raw.get("letter_spacing"), 0.0)
     best, cur = 0.0, 0.0
@@ -1877,6 +1948,11 @@ class Engine:
 
 def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, Any]:
     """Resize `source` into `target_canvas` by re-laying out its structure."""
+    # Keep the text caches bounded across many tasks in one process.
+    if len(_FIT_CACHE) > 200_000:
+        _FIT_CACHE.clear()
+        _WORD_CACHE.clear()
+        fonts()._str_widths.clear()
     engine = Engine(source, target_canvas)
     try:
         engine.layout()
