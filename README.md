@@ -4,7 +4,7 @@ A deterministic, offline layout engine for the Adobe University Hackathon
 "Chameleon" challenge. It takes a design (`canvas` + `elements`) and a target
 canvas size and returns the **same elements, re-laid-out** for the new shape.
 No pixels are generated or redrawn; no copy is rewritten; font families are
-untouched. Everything happens in `engine/resize.py` (pure Python, ~1 600 lines,
+untouched. Everything happens in `engine/resize.py` (pure Python, ~2 000 lines,
 no models, no network).
 
 ## Running it
@@ -30,7 +30,7 @@ container's output is byte-identical to a local run. The engine measures text
 with the same skia glyph advances and the same greedy wrap the renderer uses
 (it falls back to Pillow, then to a width table, if fonts are missing), so the
 line breaks it plans are the line breaks that get rendered. One task takes
-0.02–0.7 s on a laptop; the engine also runs under Python 3.11 (the image's
+0.005–0.12 s on a laptop (about 0.04 s on average across the stress-test formats); the engine also runs under Python 3.11 (the image's
 interpreter) and 3.13.
 
 ## How it works
