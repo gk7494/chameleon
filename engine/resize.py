@@ -1122,6 +1122,7 @@ class Ctx:
     gmin: float
     fmin: float
     floor_relax: float = 1.0   # fmin / fmin_top: image floors relax with the text floor
+    hero_boost: float = 1.0    # the hero image may grow past k by this factor
 
 
 def _anchor_offset(rel_left: float, rel_right: float, rel_c: float, span: float, size: float) -> float:
@@ -1216,6 +1217,8 @@ class Layouter:
         s = k
         pen = 0.0
         c = self.ctx
+        if block.role == "hero":
+            s = max(k, min(k * c.hero_boost, c.khi))
         if block.kind == "image" and block.role in self.IMAGE_FLOORS and block.h > 0:
             floor_h = self.IMAGE_FLOORS[block.role] * min(c.TW, c.TH)
             if block.role != "logo":  # the brand mark keeps its full floor
@@ -1520,6 +1523,7 @@ class Engine:
         self.mode = "h" if self.TW / self.TH >= 1.3 else "v"
         self.out: dict[str, Placement] = {}
         self.k_used = min(self.kw, self.kh)
+        self.hero_boost = 1.0
 
     # ---- lanes ----------------------------------------------------------------
     def lanes(self, root: Node) -> tuple[Node, list[Node], list[Node]]:
@@ -1666,7 +1670,7 @@ class Engine:
     def _ctx(self, k: float) -> Ctx:
         return Ctx(W=self.an.W, H=self.an.H, TW=self.TW, TH=self.TH, k=k, kw=self.kw, kh=self.kh,
                    khi=max(self.kw, self.kh), mode=self.mode, margin=self.margin, gmin=self.gmin, fmin=self.fmin,
-                   floor_relax=self.fmin / self.fmin_top)
+                   floor_relax=self.fmin / self.fmin_top, hero_boost=self.hero_boost)
 
     # readability floors tried in order when the top floor cannot fit (px)
     FLOOR_LADDER = (8.5, 7.0, 5.5)
@@ -1709,6 +1713,7 @@ class Engine:
 
     def _search_scale(self, root: Node, lanes: list[Node], footer: list[Node]):
         """Best global scale at the current floor: returns ((score, k, data), feasible)."""
+        self.hero_boost = 1.0
         k_hi = max(self.kw, self.kh)
         k_lo = k_hi / 40.0
         n = 56
@@ -1739,8 +1744,34 @@ class Engine:
                 else:
                     hi = mid
         if best is not None:
-            return best, True
+            return self._grow_hero(best, root, lanes, footer), True
         return fallback, False
+
+    HERO_BOOSTS = (1.15, 1.3, 1.5, 1.75, 2.0)
+    HERO_MAX_COVER = 0.62
+
+    def _grow_hero(self, best, root: Node, lanes: list[Node], footer: list[Node]):
+        """At the chosen k, let the hero image grow while the layout stays
+        feasible, the score (+ 0.3 * log boost) does not drop and the hero
+        covers at most ~62% of the canvas. Stops at the first failure."""
+        if not any(b.role == "hero" for b in self.an.blocks):
+            return best
+        k = best[1]
+        kept = 1.0
+        for boost in self.HERO_BOOSTS:
+            self.hero_boost = boost
+            feasible, score, data = self._try(k, root, lanes, footer)
+            score += 0.3 * math.log(boost)
+            placed: list = []
+            for p in data["plans"] + data.get("foot", []):
+                p.flatten(0.0, 0.0, placed)
+            cover = max((lp.w * lp.h for b, lp, _, _ in placed if b.role == "hero"), default=0.0)
+            if not feasible or score < best[0] or cover > self.HERO_MAX_COVER * self.TW * self.TH:
+                break
+            best = (score, k, data)
+            kept = boost
+        self.hero_boost = kept
+        return best
 
     def _avail(self) -> tuple[float, float, float]:
         m = self.margin
