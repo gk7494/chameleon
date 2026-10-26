@@ -1160,6 +1160,7 @@ class Layouter:
     def __init__(self, an: Analysis, ctx: Ctx):
         self.an = an
         self.ctx = ctx
+        self.compact = False  # buttons trim their padding (~1.1 * fs) to fit a tight row
 
     # ---- leaves -------------------------------------------------------------
     def role_fmin(self, role: str, el: Optional[El] = None) -> int:
@@ -1241,11 +1242,25 @@ class Layouter:
         s = max(k, fs / max(lb.fs, 1))
         shape_w, shape_h = sh.w * s, sh.h * s
         lw = single_line_w(lb, fs)
-        pad = max(0.6 * fs, (sh.w - lb.src_line_w) / 2 * s)
-        if lw + 2 * pad > shape_w:
+        source_pad = max(0.0, (sh.w - lb.src_line_w) / 2)
+        if s > k * 1.05:
+            # label lifted to the floor: wrap the shape around the label instead
+            # of scaling the whole shape up, so a tag never balloons
+            pad = max(0.7 * fs, source_pad * k)
             shape_w = lw + 2 * pad
+            shape_h = min(shape_h, max(sh.h * k, 2 * fs))
+        else:
+            pad = max(0.6 * fs, source_pad * s)
+            if lw + 2 * pad > shape_w:
+                shape_w = lw + 2 * pad
+        tight_w = lw + 2 * max(0.6 * fs, min(pad, 1.1 * fs))
+        if self.compact:
+            shape_w = min(shape_w, tight_w)
         pen = 0.0
         aw, ah = rot_aabb_dims(shape_w, shape_h, sh.rot)
+        if aw > max_w and shape_w > tight_w:  # trim the padding before the label
+            shape_w = tight_w
+            aw, ah = rot_aabb_dims(shape_w, shape_h, sh.rot)
         if aw > max_w or ah > max_h:
             f = min(max_w / max(aw, 1e-6), max_h / max(ah, 1e-6))
             shape_w *= f
@@ -1321,21 +1336,17 @@ class Layouter:
     def plan_row(self, node: Node, k: float, max_w: float, max_h: float, packed: bool = False) -> Plan:
         gaps = self.node_gaps(node, k, packed)
         kids = node.children
-        flex = [i for i, c in enumerate(kids) if c.has_text()]
-        plans: list[Optional[Plan]] = [None] * len(kids)
-        for i, c in enumerate(kids):
-            if i not in flex:
-                plans[i] = self.plan(c, k, max_w, max_h, packed=True)
-        rigid_w = sum(p.w for p in plans if p is not None) + sum(gaps)
-        if flex:
-            prefs = {i: self.pref_w(kids[i], k, max_w) for i in flex}
-            widths = share_width(prefs, max_w - rigid_w)
-            for i in flex:
-                plans[i] = self.plan(kids[i], k, max(1.0, widths[i]), max_h, packed=True)
-        done: list[Plan] = [p for p in plans if p is not None]
-        total_w = sum(p.w for p in done) + sum(gaps)
+        done, total_w = self._plan_row_children(node, k, max_w, max_h, packed, gaps)
         if total_w > max_w * 1.001 and len(kids) > 1:
-            return self.plan_wrapped_row(node, k, max_w, max_h)
+            if self.compact or not any(b.kind == "button" for b in node.blocks()):
+                return self.plan_wrapped_row(node, k, max_w, max_h)
+            self.compact = True  # trim button padding before wrapping the row
+            try:
+                done, total_w = self._plan_row_children(node, k, max_w, max_h, packed, gaps)
+            finally:
+                self.compact = False
+            if total_w > max_w * 1.001:
+                return self.plan_wrapped_row(node, k, max_w, max_h)
         h = max(p.h for p in done)
         out = Plan(w=total_w, h=h, penalty=sum(p.penalty for p in done))
         x = 0.0
@@ -1350,19 +1361,40 @@ class Layouter:
             x += p.w + (gaps[i] if i < len(gaps) else 0.0)
         return out
 
+    def _plan_row_children(self, node: Node, k: float, max_w: float, max_h: float, packed: bool,
+                           gaps: list[float]) -> tuple[list[Plan], float]:
+        kids = node.children
+        flex = [i for i, c in enumerate(kids) if c.has_text()]
+        plans: list[Optional[Plan]] = [None] * len(kids)
+        for i, c in enumerate(kids):
+            if i not in flex:
+                plans[i] = self.plan(c, k, max_w, max_h, packed=True)
+        rigid_w = sum(p.w for p in plans if p is not None) + sum(gaps)
+        if flex:
+            prefs = {i: self.pref_w(kids[i], k, max_w) for i in flex}
+            widths = share_width(prefs, max_w - rigid_w)
+            for i in flex:
+                plans[i] = self.plan(kids[i], k, max(1.0, widths[i]), max_h, packed=True)
+        done: list[Plan] = [p for p in plans if p is not None]
+        return done, sum(p.w for p in done) + sum(gaps)
+
     def plan_wrapped_row(self, node: Node, k: float, max_w: float, max_h: float) -> Plan:
         """A row that does not fit flex-wraps its children into several rows."""
         c = self.ctx
         gap = max(c.gmin, 0.02 * c.TW)
         rows: list[list[Plan]] = [[]]
         x = 0.0
-        for child in node.children:
-            p = self.plan(child, k, max_w, max_h, packed=True)
-            if rows[-1] and x + p.w > max_w:
-                rows.append([])
-                x = 0.0
-            rows[-1].append(p)
-            x += p.w + gap
+        was_compact, self.compact = self.compact, True
+        try:
+            for child in node.children:
+                p = self.plan(child, k, max_w, max_h, packed=True)
+                if rows[-1] and x + p.w > max_w:
+                    rows.append([])
+                    x = 0.0
+                rows[-1].append(p)
+                x += p.w + gap
+        finally:
+            self.compact = was_compact
         row_gap = max(c.gmin, 0.5 * gap)
         w = max(sum(p.w for p in r) + gap * (len(r) - 1) for r in rows)
         out = Plan(w=w, h=0.0, penalty=0.4 + 0.1 * len(rows) + sum(p.penalty for r in rows for p in r), wrapped=True)
