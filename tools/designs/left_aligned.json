@@ -1,0 +1,120 @@
+{
+ "task_id": "stress_left_aligned",
+ "source": {
+  "canvas": {
+   "width": 1200,
+   "height": 628
+  },
+  "elements": [
+   {
+    "id": "bg",
+    "type": "image",
+    "x": 0,
+    "y": 0,
+    "width": 1200,
+    "height": 628,
+    "z_index": 0,
+    "asset_id": "solstice_bg_gradient.png",
+    "fit": "cover"
+   },
+   {
+    "id": "logo",
+    "type": "image",
+    "x": 60,
+    "y": 48,
+    "width": 210,
+    "height": 70,
+    "z_index": 3,
+    "asset_id": "solstice_logo_lockup.png",
+    "fit": "contain"
+   },
+   {
+    "id": "kicker",
+    "type": "text",
+    "x": 60,
+    "y": 170,
+    "width": 400,
+    "height": 30,
+    "z_index": 5,
+    "content": "LIMITED SUMMER RELEASE",
+    "font_family": "Solstice Sans",
+    "font_size": 18,
+    "color": "rgba(240,178,66,1)",
+    "text_align": "left",
+    "font_weight": "bold",
+    "letter_spacing": 2
+   },
+   {
+    "id": "headline",
+    "type": "text",
+    "x": 60,
+    "y": 210,
+    "width": 560,
+    "height": 150,
+    "z_index": 5,
+    "content": "Golden hour, bottled for the long evenings",
+    "font_family": "Solstice Serif",
+    "font_size": 52,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "left",
+    "font_weight": "bold"
+   },
+   {
+    "id": "body",
+    "type": "text",
+    "x": 60,
+    "y": 375,
+    "width": 520,
+    "height": 80,
+    "z_index": 5,
+    "content": "Sparkling botanical infusions with blood orange, wild honey and a hint of smoked rosemary.",
+    "font_family": "Solstice Sans",
+    "font_size": 20,
+    "color": "rgba(255,255,255,0.85)",
+    "text_align": "left"
+   },
+   {
+    "id": "cta_bg",
+    "type": "shape",
+    "x": 60,
+    "y": 490,
+    "width": 250,
+    "height": 60,
+    "z_index": 3,
+    "shape_type": "rectangle",
+    "fill_color": "rgba(232,106,58,1)",
+    "corner_radius": 30
+   },
+   {
+    "id": "cta_label",
+    "type": "text",
+    "x": 60,
+    "y": 505,
+    "width": 250,
+    "height": 30,
+    "z_index": 4,
+    "content": "Order a case",
+    "font_family": "Solstice Sans",
+    "font_size": 22,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   },
+   {
+    "id": "product",
+    "type": "image",
+    "x": 720,
+    "y": 80,
+    "width": 460,
+    "height": 460,
+    "z_index": 2,
+    "asset_id": "solstice_bottle.png",
+    "fit": "contain"
+   }
+  ]
+ },
+ "target_canvas": {
+  "width": 1080,
+  "height": 1080
+ }
+}

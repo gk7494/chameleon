@@ -1,0 +1,186 @@
+{
+ "task_id": "stress_image_grid",
+ "source": {
+  "canvas": {
+   "width": 1080,
+   "height": 1080
+  },
+  "elements": [
+   {
+    "id": "bg",
+    "type": "image",
+    "x": 0,
+    "y": 0,
+    "width": 1080,
+    "height": 1080,
+    "z_index": 0,
+    "asset_id": "solstice_bg_gradient.png",
+    "fit": "cover"
+   },
+   {
+    "id": "title",
+    "type": "text",
+    "x": 90,
+    "y": 60,
+    "width": 900,
+    "height": 80,
+    "z_index": 5,
+    "content": "Four flavors for four evenings",
+    "font_family": "Solstice Serif",
+    "font_size": 48,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   },
+   {
+    "id": "intro",
+    "type": "text",
+    "x": 190,
+    "y": 150,
+    "width": 700,
+    "height": 40,
+    "z_index": 5,
+    "content": "Pick one, or take the whole set home.",
+    "font_family": "Solstice Sans",
+    "font_size": 22,
+    "color": "rgba(255,255,255,0.85)",
+    "text_align": "center"
+   },
+   {
+    "id": "tile1",
+    "type": "image",
+    "x": 140,
+    "y": 230,
+    "width": 370,
+    "height": 280,
+    "z_index": 2,
+    "asset_id": "test_tile_1.png",
+    "fit": "contain"
+   },
+   {
+    "id": "cap1",
+    "type": "text",
+    "x": 140,
+    "y": 522,
+    "width": 370,
+    "height": 34,
+    "z_index": 5,
+    "content": "Blood Orange",
+    "font_family": "Solstice Sans",
+    "font_size": 24,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   },
+   {
+    "id": "tile2",
+    "type": "image",
+    "x": 570,
+    "y": 230,
+    "width": 370,
+    "height": 280,
+    "z_index": 2,
+    "asset_id": "test_tile_2.png",
+    "fit": "contain"
+   },
+   {
+    "id": "cap2",
+    "type": "text",
+    "x": 570,
+    "y": 522,
+    "width": 370,
+    "height": 34,
+    "z_index": 5,
+    "content": "Garden Mint",
+    "font_family": "Solstice Sans",
+    "font_size": 24,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   },
+   {
+    "id": "tile3",
+    "type": "image",
+    "x": 140,
+    "y": 620,
+    "width": 370,
+    "height": 280,
+    "z_index": 2,
+    "asset_id": "test_tile_3.png",
+    "fit": "contain"
+   },
+   {
+    "id": "cap3",
+    "type": "text",
+    "x": 140,
+    "y": 912,
+    "width": 370,
+    "height": 34,
+    "z_index": 5,
+    "content": "Lavender Dusk",
+    "font_family": "Solstice Sans",
+    "font_size": 24,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   },
+   {
+    "id": "tile4",
+    "type": "image",
+    "x": 570,
+    "y": 620,
+    "width": 370,
+    "height": 280,
+    "z_index": 2,
+    "asset_id": "test_tile_4.png",
+    "fit": "contain"
+   },
+   {
+    "id": "cap4",
+    "type": "text",
+    "x": 570,
+    "y": 912,
+    "width": 370,
+    "height": 34,
+    "z_index": 5,
+    "content": "Wild Berry",
+    "font_family": "Solstice Sans",
+    "font_size": 24,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   },
+   {
+    "id": "cta_bg",
+    "type": "shape",
+    "x": 390,
+    "y": 1000,
+    "width": 300,
+    "height": 56,
+    "z_index": 3,
+    "shape_type": "rectangle",
+    "fill_color": "rgba(232,106,58,1)",
+    "corner_radius": 28
+   },
+   {
+    "id": "cta_label",
+    "type": "text",
+    "x": 390,
+    "y": 1013,
+    "width": 300,
+    "height": 30,
+    "z_index": 4,
+    "content": "Shop the set",
+    "font_family": "Solstice Sans",
+    "font_size": 22,
+    "color": "rgba(255,255,255,1)",
+    "text_align": "center",
+    "font_weight": "bold"
+   }
+  ]
+ },
+ "target_canvas": {
+  "width": 1080,
+  "height": 1080
+ }
+}

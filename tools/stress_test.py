@@ -4,7 +4,9 @@ Stress test for the engine — not part of the scored pipeline.
     python -m tools.stress_test            # everything
     python -m tools.stress_test --quick    # skip rendering (structure checks only)
 
-1. Runs every input/*.json design through resize() at a catalogue of real
+1. Runs every input/*.json design, plus the extra designs in tools/designs/
+   (left-aligned copy, photo background, image grid, card panel; their
+   images come from tools/make_test_assets.py), through resize() at a catalogue of real
    target formats and checks: ids preserved, required fields, nothing
    off-canvas, image aspect kept (non-cover), integer font sizes >= 1, and
    no unintended overlap between separate layout blocks.
@@ -25,8 +27,13 @@ import sys
 import time
 from pathlib import Path
 
+import engine.resize as engine_resize
 from engine.main import self_check
 from engine.resize import analyze, box_area, box_inter, rect_aabb, resize
+
+TEST_ASSETS = Path("tools/test_assets")
+# test-only: let the engine's background map read the synthetic test images
+engine_resize._ASSET_DIRS.append(TEST_ASSETS)
 
 FORMATS = [
     ("story", 1080, 1920), ("square", 1080, 1080), ("post45", 1080, 1350),
@@ -70,6 +77,19 @@ def overlap_problems(src: dict, out: dict) -> list[str]:
         small = min(box_area(A), box_area(B)) or 1.0
         if inter / small > 0.02:
             probs.append(f"{a['id']} x {b['id']} ({inter / small:.0%})")
+    # a panel (card) must not cover flow blocks that are not inside it
+    by_id = {e["id"]: e for e in out["elements"]}
+    for pb in an.panels:
+        pe = by_id[pb.els[0].id]
+        P = rect_aabb(pe["x"], pe["y"], pe["width"], pe["height"], pe.get("rotation", 0))
+        for b in an.blocks:
+            if b.panel is pb:
+                continue
+            for m in b.els:
+                e = by_id[m.id]
+                B = rect_aabb(e["x"], e["y"], e["width"], e["height"], e.get("rotation", 0))
+                if box_inter(P, B) / (box_area(B) or 1.0) > 0.02:
+                    probs.append(f"panel {pe['id']} covers {m.id}")
     return probs
 
 
@@ -116,21 +136,51 @@ def adversarial_cases(base: dict) -> list[tuple[str, dict, dict]]:
     return cases
 
 
+def render_assets_dir(out_dir: Path) -> str:
+    """brand_kit/assets plus the synthetic test images, in one folder (with
+    the brand fonts beside it, where the renderer looks for them)."""
+    import shutil
+    kit = out_dir / "_kit"
+    for sub, files in (("assets", list(Path("brand_kit/assets").glob("*")) + list(TEST_ASSETS.glob("*.png"))),
+                       ("fonts", list(Path("brand_kit/fonts").glob("*")))):
+        (kit / sub).mkdir(parents=True, exist_ok=True)
+        for f in files:
+            shutil.copy(f, kit / sub / f.name)
+    return str(kit / "assets")
+
+
 def main() -> int:
     quick = "--quick" in sys.argv
-    inputs = sorted(glob.glob("input/*.json"))
-    if not inputs:
+    samples = sorted(glob.glob("input/*.json"))
+    if not samples:
         print("no input/*.json found; run from the repo root")
         return 1
+    inputs = samples + sorted(glob.glob("tools/designs/*.json"))
     failures = 0
     out_dir = Path("output/stress")
     out_dir.mkdir(parents=True, exist_ok=True)
+    assets = render_assets_dir(out_dir) if not quick else ""
 
     print("== format matrix")
     for f in inputs:
         src = json.load(open(f))["source"]
         stem = Path(f).stem.replace("chameleon_sample_", "")
         tiles = []
+        if not quick:
+            try:
+                from PIL import Image, ImageDraw
+                from renderer.converter.convert import render_design_to_png
+                png = out_dir / f"{stem}_source.png"
+                render_design_to_png(src, assets, str(png))
+                im = Image.open(png).convert("RGB")
+                sc = min(520 / im.width, 520 / im.height, 1.0)
+                im = im.resize((max(1, int(im.width * sc)), max(1, int(im.height * sc))))
+                tile = Image.new("RGB", (540, 560), (215, 225, 235))
+                tile.paste(im, ((540 - im.width) // 2, 30 + (520 - im.height) // 2))
+                ImageDraw.Draw(tile).text((8, 8), f"SOURCE {src['canvas']['width']}x{src['canvas']['height']}", fill=(0, 0, 0))
+                tiles.append(tile)
+            except Exception as exc:
+                print(f"    (source render skipped: {exc})")
         for name, w, h in FORMATS:
             t0 = time.time()
             out = resize(src, {"width": w, "height": h})
@@ -144,7 +194,7 @@ def main() -> int:
                     from PIL import Image, ImageDraw
                     from renderer.converter.convert import render_design_to_png
                     png = out_dir / f"{stem}_{name}.png"
-                    render_design_to_png(out, "brand_kit/assets", str(png))
+                    render_design_to_png(out, assets, str(png))
                     im = Image.open(png).convert("RGB")
                     sc = min(520 / im.width, 520 / im.height, 1.0)
                     im = im.resize((max(1, int(im.width * sc)), max(1, int(im.height * sc))))
@@ -164,7 +214,7 @@ def main() -> int:
             print(f"  -> {out_dir / f'sheet_{stem}.png'}")
 
     print("== adversarial battery (on the first input design)")
-    base = json.load(open(inputs[-1]))["source"]
+    base = json.load(open(samples[-1]))["source"]
     for name, src, tgt in adversarial_cases(base):
         t0 = time.time()
         try:
