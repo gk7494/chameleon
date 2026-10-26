@@ -1198,6 +1198,12 @@ class Layouter:
         if packed:
             box_w = max(1.0, min(box_w, fit.max_line_w + 2))
             fit = measure_text(el, fs, box_w)
+        elif fit.n > el.src_lines and box_w < max_w:
+            # wrapping more than the source did: use the room the lane offers
+            wide = measure_text(el, fs, max_w)
+            if wide.n < fit.n:
+                box_w = max(1.0, min(max_w, wide.max_line_w + 2))
+                fit = measure_text(el, fs, box_w)
         pen = block.importance * max(0, fit.n - el.src_lines) / max(1, el.src_lines)
         if fs < fmin:
             pen += block.importance * 0.6
