@@ -706,6 +706,7 @@ class Analysis:
     decor: list[El]
     panels: list[Block]
     blocks: list[Block]
+    base_fs: float = 0.0          # body-copy size: hierarchy-aware floors scale from it
 
 
 def _tight_text_box(el: El) -> Box:
@@ -922,7 +923,12 @@ def analyze(source: dict) -> Analysis:
             if not e.role:
                 e.role = b.role
 
-    return Analysis(W=W, H=H, els=els, backgrounds=backgrounds, decor=decor, panels=panels, blocks=blocks)
+    body_fs = [t.fs for t in texts if t.role in ("body", "subhead")]
+    if not body_fs:
+        body_fs = [t.fs for t in texts if t.role != "legal"]
+    base_fs = float(min(body_fs)) if body_fs else 0.0
+    return Analysis(W=W, H=H, els=els, backgrounds=backgrounds, decor=decor, panels=panels, blocks=blocks,
+                    base_fs=base_fs)
 
 
 # ----------------------------------------------------------------------------
@@ -1115,6 +1121,7 @@ class Ctx:
     margin: float
     gmin: float
     fmin: float
+    floor_relax: float = 1.0   # fmin / fmin_top: image floors relax with the text floor
 
 
 def _anchor_offset(rel_left: float, rel_right: float, rel_c: float, span: float, size: float) -> float:
@@ -1155,12 +1162,16 @@ class Layouter:
         self.ctx = ctx
 
     # ---- leaves -------------------------------------------------------------
-    def role_fmin(self, role: str) -> int:
+    def role_fmin(self, role: str, el: Optional[El] = None) -> int:
         f = self.ctx.fmin
         if role == "legal":
             f *= 0.7
         elif role in ("kicker", "badge"):
             f *= 0.8
+        elif el is not None and self.an.base_fs > 0 and el.fs > self.an.base_fs:
+            # keep the hierarchy when everything sits on the floor: a headline
+            # stays bigger than the body copy it was bigger than in the source
+            f *= min(2.0, math.sqrt(el.fs / self.an.base_fs))
         return max(1, int(round(f)))
 
     # smallest sensible size (fraction of the shorter target side) per role
@@ -1169,7 +1180,8 @@ class Layouter:
     def text_plan(self, block: Block, k: float, max_w: float, packed: bool) -> LeafPlan:
         el = block.els[0]
         c = self.ctx
-        fs = max(self.role_fmin(block.role), int(round(el.fs * k)))
+        fmin = self.role_fmin(block.role, el)
+        fs = max(fmin, int(round(el.fs * k)))
         max_w = max(1.0, max_w)
         if packed:
             box_w = min(max_w, single_line_w(el, fs) + 2)
@@ -1187,7 +1199,7 @@ class Layouter:
             box_w = max(1.0, min(box_w, fit.max_line_w + 2))
             fit = measure_text(el, fs, box_w)
         pen = block.importance * max(0, fit.n - el.src_lines) / max(1, el.src_lines)
-        if fs < self.role_fmin(block.role):
+        if fs < fmin:
             pen += block.importance * 0.6
         aw, ah = rot_aabb_dims(box_w, fit.painted_h, el.rot)
         return LeafPlan(w=aw, h=ah, scale=k, fs=fs, text_w=box_w, text_h=fit.painted_h,
@@ -1199,11 +1211,13 @@ class Layouter:
         c = self.ctx
         if block.kind == "image" and block.role in self.IMAGE_FLOORS and block.h > 0:
             floor_h = self.IMAGE_FLOORS[block.role] * min(c.TW, c.TH)
+            if block.role != "logo":  # the brand mark keeps its full floor
+                floor_h *= c.floor_relax
             s = max(s, min(floor_h / block.h, c.khi))
         if block.kind == "group":
             for e in block.els:
                 if e.type == "text" and e.fs > 0:
-                    s = max(s, self.role_fmin(e.role or "body") / e.fs)
+                    s = max(s, self.role_fmin(e.role or "body", e) / e.fs)
         w, h = block.w * s, block.h * s
         if w > max_w or h > max_h:
             f = min(max_w / max(w, 1e-6), max_h / max(h, 1e-6))
@@ -1216,7 +1230,7 @@ class Layouter:
     def button_plan(self, block: Block, k: float, max_w: float, max_h: float) -> LeafPlan:
         sh, lb = block.shape, block.label
         assert sh is not None and lb is not None
-        fmin = self.role_fmin(block.role)
+        fmin = self.role_fmin(block.role, lb)
         fs = max(fmin, int(round(lb.fs * k)))
         s = max(k, fs / max(lb.fs, 1))
         shape_w, shape_h = sh.w * s, sh.h * s
@@ -1252,7 +1266,7 @@ class Layouter:
             b = node.block
             if b.kind == "text":
                 el = b.els[0]
-                fs = max(self.role_fmin(b.role), int(round(el.fs * k)))
+                fs = max(self.role_fmin(b.role, el), int(round(el.fs * k)))
                 return min(max_w, single_line_w(el, fs) + 2)
             return self.leaf_plan(b, k, max_w, 1e9, True).w
         if node.axis == "v":
@@ -1419,7 +1433,8 @@ class Engine:
         tmin = min(self.TW, self.TH)
         self.margin = max(2.0, 0.03 * tmin)
         self.gmin = max(2.0, 0.012 * tmin)
-        self.fmin = max(5.0, 0.0085 * max(self.TW, self.TH))
+        self.fmin = max(10.0, 0.0085 * max(self.TW, self.TH))
+        self.fmin_top = self.fmin
         self.mode = "h" if self.TW / self.TH >= 1.3 else "v"
         self.out: dict[str, Placement] = {}
         self.k_used = min(self.kw, self.kh)
@@ -1568,9 +1583,50 @@ class Engine:
 
     def _ctx(self, k: float) -> Ctx:
         return Ctx(W=self.an.W, H=self.an.H, TW=self.TW, TH=self.TH, k=k, kw=self.kw, kh=self.kh,
-                   khi=max(self.kw, self.kh), mode=self.mode, margin=self.margin, gmin=self.gmin, fmin=self.fmin)
+                   khi=max(self.kw, self.kh), mode=self.mode, margin=self.margin, gmin=self.gmin, fmin=self.fmin,
+                   floor_relax=self.fmin / self.fmin_top)
+
+    # readability floors tried in order when the top floor cannot fit (px)
+    FLOOR_LADDER = (8.5, 7.0, 5.5)
 
     def _layout_flow(self, root: Node, lanes: list[Node], footer: list[Node]) -> None:
+        """Search the scale at the top readability floor; only if nothing fits
+        there, step down the floor ladder and keep the best feasible result,
+        charging each step down (score + 1.5 * log(floor / top))."""
+        top = self.fmin_top
+        floors = [top] + [f for f in self.FLOOR_LADDER if f < top]
+        chosen = None
+        chosen_floor = top
+        best_relaxed = None
+        last_infeasible = None
+        for f in floors:
+            self.fmin = f
+            res, feasible = self._search_scale(root, lanes, footer)
+            if res is None:
+                continue
+            if feasible and f == top:
+                chosen, chosen_floor = res, f
+                break
+            if feasible:
+                adj = res[0] + 1.5 * math.log(f / top)
+                if best_relaxed is None or adj > best_relaxed[0]:
+                    best_relaxed = (adj, res, f)
+            else:
+                last_infeasible = (res, f)
+        if chosen is None:
+            if best_relaxed is not None:
+                _, chosen, chosen_floor = best_relaxed
+            elif last_infeasible is not None:
+                chosen, chosen_floor = last_infeasible
+        self.fmin = chosen_floor
+        if chosen is None:
+            return
+        _, k, data = chosen
+        self.k_used = k
+        self._commit(k, root, lanes, footer, data)
+
+    def _search_scale(self, root: Node, lanes: list[Node], footer: list[Node]):
+        """Best global scale at the current floor: returns ((score, k, data), feasible)."""
         k_hi = max(self.kw, self.kh)
         k_lo = k_hi / 40.0
         n = 56
@@ -1600,12 +1656,9 @@ class Engine:
                     lo = mid
                 else:
                     hi = mid
-        chosen = best or fallback
-        if chosen is None:
-            return
-        _, k, data = chosen
-        self.k_used = k
-        self._commit(k, root, lanes, footer, data)
+        if best is not None:
+            return best, True
+        return fallback, False
 
     def _avail(self) -> tuple[float, float, float]:
         m = self.margin
