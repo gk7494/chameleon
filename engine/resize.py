@@ -1696,8 +1696,38 @@ class Engine:
         elif self.mode == "v":
             kids = list(root.children)
         else:
-            kids = list(root.children) if root.axis == "h" else merge_text_runs(root.children)
+            kids = list(root.children) if root.axis == "h" else merge_text_runs(self._merge_grid_rows(root.children))
         return root, kids, footer
+
+    @staticmethod
+    def _merge_grid_rows(kids: list[Node]) -> list[Node]:
+        """Consecutive rows with the same make-up (an image grid: tile +
+        caption, tile + caption) become one row of all their cells, so a wide
+        format shows the grid as a strip instead of splitting it across
+        columns."""
+        def sig(n: Node) -> tuple:
+            if n.is_leaf:
+                return (n.block.kind,)
+            return (n.axis,) + tuple(sig(c) for c in n.children)
+
+        def gridrow(n: Node) -> bool:
+            return not n.is_leaf and n.axis == "h" and len(n.children) >= 2
+
+        out: list[Node] = []
+        i = 0
+        while i < len(kids):
+            j = i + 1
+            if gridrow(kids[i]):
+                while (j < len(kids) and gridrow(kids[j]) and sig(kids[j]) == sig(kids[i])
+                       and abs(kids[j].w - kids[i].w) <= 0.25 * max(kids[i].w, 1.0)):
+                    j += 1
+            if j - i >= 2:
+                cells = [c for row in kids[i:j] for c in row.children]
+                out.append(Node(axis="h", children=cells, box=_node_box(kids[i:j]), synthetic=True))
+            else:
+                out.append(kids[i])
+            i = j
+        return out
 
     # ---- driver ---------------------------------------------------------------
     def layout(self) -> None:
