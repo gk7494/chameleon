@@ -1625,9 +1625,24 @@ class Engine:
     def layout(self) -> None:
         an = self.an
         if an.blocks:
-            root = build_tree(self._top_level_nodes(), an.W, an.H)
-            root, lanes, footer = self.lanes(root)
-            self._layout_flow(root, lanes, footer)
+            ar = self.TW / self.TH
+            modes = [self.mode]
+            if self.NEAR_SQUARE[0] <= ar < self.NEAR_SQUARE[1]:
+                modes.append("h" if self.mode == "v" else "v")
+            best = None
+            for mode in modes:
+                self.mode = mode
+                self.out = {}
+                root = build_tree(self._top_level_nodes(), an.W, an.H)
+                root, lanes, footer = self.lanes(root)
+                score, feasible = self._layout_flow(root, lanes, footer)
+                if mode != modes[0]:
+                    score -= self.MODE_SWITCH_MARGIN
+                # fit first, then the readability floor held, then the score
+                key = (feasible, self.fmin, score)
+                if best is None or key > best[0]:
+                    best = (key, mode, self.out, self.k_used, self.fmin, self.hero_boost)
+            _, self.mode, self.out, self.k_used, self.fmin, self.hero_boost = best
             self._shift_for_background()
         self._place_backgrounds()
         self._place_decor()
@@ -1727,11 +1742,15 @@ class Engine:
 
     # readability floors tried in order when the top floor cannot fit (px)
     FLOOR_LADDER = (8.5, 7.0, 5.5)
+    # aspect ratios (w / h) where both a stack and a side-by-side flow are tried
+    NEAR_SQUARE = (0.8, 1.3)
+    MODE_SWITCH_MARGIN = 0.1  # the other mode must clearly win to override the default
 
-    def _layout_flow(self, root: Node, lanes: list[Node], footer: list[Node]) -> None:
+    def _layout_flow(self, root: Node, lanes: list[Node], footer: list[Node]) -> tuple[float, bool]:
         """Search the scale at the top readability floor; only if nothing fits
         there, step down the floor ladder and keep the best feasible result,
-        charging each step down (score + 1.5 * log(floor / top))."""
+        charging each step down (score + 1.5 * log(floor / top)). Commits the
+        result and returns (score, feasible)."""
         top = self.fmin_top
         floors = [top] + [f for f in self.FLOOR_LADDER if f < top]
         chosen = None
@@ -1744,7 +1763,7 @@ class Engine:
             if res is None:
                 continue
             if feasible and f == top:
-                chosen, chosen_floor = res, f
+                chosen, chosen_floor, score = res, f, res[0]
                 break
             if feasible:
                 adj = res[0] + 1.5 * math.log(f / top)
@@ -1752,17 +1771,20 @@ class Engine:
                     best_relaxed = (adj, res, f)
             else:
                 last_infeasible = (res, f)
+        feasible = True
         if chosen is None:
             if best_relaxed is not None:
-                _, chosen, chosen_floor = best_relaxed
+                score, chosen, chosen_floor = best_relaxed
             elif last_infeasible is not None:
                 chosen, chosen_floor = last_infeasible
+                score, feasible = chosen[0], False
         self.fmin = chosen_floor
         if chosen is None:
-            return
+            return -math.inf, False
         _, k, data = chosen
         self.k_used = k
         self._commit(k, root, lanes, footer, data)
+        return score, feasible
 
     def _search_scale(self, root: Node, lanes: list[Node], footer: list[Node]):
         """Best global scale at the current floor: returns ((score, k, data), feasible)."""
