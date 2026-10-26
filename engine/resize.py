@@ -943,6 +943,7 @@ class Node:
     box: Box = (0.0, 0.0, 0.0, 0.0)
     overlay: bool = False
     synthetic: bool = False   # built by the engine (column of lanes), not found in the source
+    panel: Optional["Block"] = None  # the contents of this panel: layout reserves its padding
 
     @property
     def is_leaf(self) -> bool:
@@ -1046,11 +1047,39 @@ def build_tree(leaves: list[Node], W: float, H: float) -> Node:
     children: list[Node] = []
     for part in (before, after):
         child = build_tree(part, W, H)
-        if not child.is_leaf and child.axis == axis and not child.overlay:
+        if not child.is_leaf and child.axis == axis and not child.overlay and child.panel is None:
             children.extend(child.children)  # flatten same-axis nesting
         else:
             children.append(child)
     return Node(axis=axis, children=children, box=_node_box(children))
+
+
+def merge_text_runs(kids: list[Node], synthetic: bool = False) -> list[Node]:
+    """Consecutive text-only children become one text column (used when a
+    vertical stack is re-read as a horizontal flow)."""
+    def textish(n: Node) -> bool:
+        if n.is_leaf:
+            return n.block.is_textlike
+        return all(textish(c) for c in n.children)
+
+    out: list[Node] = []
+    run: list[Node] = []
+
+    def flush() -> None:
+        if len(run) == 1:
+            out.append(run[0])
+        elif run:
+            out.append(Node(axis="v", children=list(run), box=_node_box(run), synthetic=synthetic))
+        run.clear()
+
+    for n in kids:
+        if textish(n):
+            run.append(n)
+        else:
+            flush()
+            out.append(n)
+    flush()
+    return out
 
 
 def prune_role(node: Node, role: str) -> tuple[Optional[Node], list[Node]]:
@@ -1068,7 +1097,8 @@ def prune_role(node: Node, role: str) -> tuple[Optional[Node], list[Node]]:
         return None, removed
     if len(kept) == 1:
         return kept[0], removed
-    return Node(axis=node.axis, children=kept, box=_node_box(kept), overlay=node.overlay), removed
+    return Node(axis=node.axis, children=kept, box=_node_box(kept), overlay=node.overlay,
+                panel=node.panel), removed
 
 
 # ----------------------------------------------------------------------------
@@ -1155,6 +1185,17 @@ def share_width(prefs: dict[int, float], remaining: float) -> dict[int, float]:
             widths[i] = budget * prefs[i] / max(tot, 1e-6)
         break
     return widths
+
+
+def panel_pads(panel_box: Box, content_box: Box, k: float, TW: float, TH: float) -> tuple[float, float, float, float]:
+    """A panel's padding (left, top, right, bottom) around its contents in the
+    target: the source padding scaled by k, capped at 4% of the shorter side
+    so a card on a short banner does not spend its height on padding."""
+    cap = max(2.0, 0.04 * min(TW, TH))
+    return (min(cap, max(0.0, content_box[0] - panel_box[0]) * k),
+            min(cap, max(0.0, content_box[1] - panel_box[1]) * k),
+            min(cap, max(0.0, panel_box[2] - content_box[2]) * k),
+            min(cap, max(0.0, panel_box[3] - content_box[3]) * k))
 
 
 class Layouter:
@@ -1287,6 +1328,11 @@ class Layouter:
 
     # ---- nodes --------------------------------------------------------------
     def pref_w(self, node: Node, k: float, max_w: float) -> float:
+        if node.panel is not None:
+            pl, _, pr, _ = panel_pads(node.panel.box, node.box, k, self.ctx.TW, self.ctx.TH)
+            pad = pl + pr
+            inner = Node(axis=node.axis, children=node.children, box=node.box, overlay=node.overlay)
+            return min(max_w, self.pref_w(inner, k, max_w) + pad)
         if node.is_leaf:
             b = node.block
             if b.kind == "text":
@@ -1318,9 +1364,66 @@ class Layouter:
         if node.is_leaf:
             lp = self.leaf_plan(node.block, k, max_w, max_h, packed)
             return Plan(w=lp.w, h=lp.h, leaf=lp, block=node.block, penalty=lp.penalty)
+        if node.panel is not None:
+            return self.plan_panel(node, k, max_w, max_h, packed)
         if node.axis == "v":
             return self.plan_stack(node, k, max_w, max_h, packed)
         return self.plan_row(node, k, max_w, max_h, packed)
+
+    def _panel_rows(self, node: Node) -> list[Node]:
+        """Side-by-side readings of a stacked card: picture | the rest, the
+        rest | picture, and every run of text merged into one column."""
+        kids = node.children
+        rows: list[Node] = []
+
+        def col(group: list[Node]) -> Node:
+            return group[0] if len(group) == 1 else Node(axis="v", children=list(group), box=_node_box(group),
+                                                         synthetic=True)
+        if len(kids) > 2 and not kids[0].has_text():
+            rows.append(Node(axis="h", children=[kids[0], col(kids[1:])], box=node.box, synthetic=True))
+        if len(kids) > 2 and not kids[-1].has_text():
+            rows.append(Node(axis="h", children=[col(kids[:-1]), kids[-1]], box=node.box, synthetic=True))
+        merged = merge_text_runs(kids, synthetic=True)
+        if len(merged) > 1:
+            rows.append(Node(axis="h", children=merged, box=node.box, synthetic=True))
+        return rows
+
+    def _crushes_text(self, plan: Plan) -> bool:
+        """True when some text in the plan had to go below its readability floor."""
+        placed: list = []
+        plan.flatten(0.0, 0.0, placed)
+        for b, lp, _, _ in placed:
+            if b.kind == "text" and lp.fs < self.role_fmin(b.role, b.els[0]):
+                return True
+            if b.kind == "button" and lp.fs < self.role_fmin(b.role, b.label):
+                return True
+        return False
+
+    def plan_panel(self, node: Node, k: float, max_w: float, max_h: float, packed: bool) -> Plan:
+        """A panel's contents, inset by the panel's source padding (scaled by
+        k) so the card that _place_panels wraps around them stays inside the
+        space the layout gave it."""
+        pl, pt, pr, pbm = panel_pads(node.panel.box, node.box, k, self.ctx.TW, self.ctx.TH)
+        iw, ih = max(1.0, max_w - pl - pr), max(1.0, max_h - pt - pbm)
+        inner_node = Node(axis=node.axis, children=node.children, box=node.box, overlay=node.overlay,
+                          synthetic=node.synthetic)
+        inner = self.plan(inner_node, k, iw, ih, packed)
+        if self.ctx.mode == "h" and node.axis == "v" and len(node.children) > 1 and not node.overlay:
+            # a card in a wide format may lay its contents out side by side
+            # (picture | text column), like the root lanes when the axis flips
+            def fits(p: Plan) -> bool:
+                return p.w <= iw + 0.5 and p.h <= ih + 0.5
+            if not fits(inner):  # only when the stack does not fit ...
+                best = None
+                for row in self._panel_rows(node):
+                    alt = self.plan(row, k, iw, ih, packed=True)
+                    if fits(alt) and not self._crushes_text(alt):  # ... and never by crushing text
+                        if best is None or alt.penalty < best.penalty:
+                            best = alt
+                if best is not None:
+                    inner = best
+        return Plan(w=inner.w + pl + pr, h=inner.h + pt + pbm, children=[(pl, pt, inner)],
+                    penalty=inner.penalty, wrapped=inner.wrapped)
 
     def plan_stack(self, node: Node, k: float, max_w: float, max_h: float, packed: bool) -> Plan:
         gaps = self.node_gaps(node, k)
@@ -1593,33 +1696,8 @@ class Engine:
         elif self.mode == "v":
             kids = list(root.children)
         else:
-            kids = list(root.children) if root.axis == "h" else self._merge_text_runs(root.children)
+            kids = list(root.children) if root.axis == "h" else merge_text_runs(root.children)
         return root, kids, footer
-
-    def _merge_text_runs(self, kids: list[Node]) -> list[Node]:
-        def textish(n: Node) -> bool:
-            if n.is_leaf:
-                return n.block.is_textlike
-            return all(textish(c) for c in n.children)
-
-        out: list[Node] = []
-        run: list[Node] = []
-
-        def flush() -> None:
-            if len(run) == 1:
-                out.append(run[0])
-            elif run:
-                out.append(Node(axis="v", children=list(run), box=_node_box(run)))
-            run.clear()
-
-        for n in kids:
-            if textish(n):
-                run.append(n)
-            else:
-                flush()
-                out.append(n)
-        flush()
-        return out
 
     # ---- driver ---------------------------------------------------------------
     def layout(self) -> None:
@@ -1638,8 +1716,10 @@ class Engine:
                 score, feasible = self._layout_flow(root, lanes, footer)
                 if mode != modes[0]:
                     score -= self.MODE_SWITCH_MARGIN
-                # fit first, then the readability floor held, then the score
-                key = (feasible, self.fmin, score)
+                # fit first, then text that stays legible, then the readability
+                # floor held, then the score
+                illegible = sum(1 for p in self.out.values() if p.fs is not None and p.fs < 0.7 * self.fmin)
+                key = (feasible, -illegible, self.fmin, score)
                 if best is None or key > best[0]:
                     best = (key, mode, self.out, self.k_used, self.fmin, self.hero_boost)
             _, self.mode, self.out, self.k_used, self.fmin, self.hero_boost = best
@@ -1729,7 +1809,10 @@ class Engine:
         for pb in an.panels:
             members = [Node(axis="leaf", block=b, box=b.box) for b in an.blocks if b.panel is pb]
             if len(members) >= 2:
-                nodes.append(build_tree(members, an.W, an.H))
+                sub = build_tree(members, an.W, an.H)
+                if not sub.is_leaf:
+                    sub.panel = pb
+                nodes.append(sub)
             else:
                 nodes.extend(members)
         nodes.extend(Node(axis="leaf", block=b, box=b.box) for b in an.blocks if b.panel is None)
@@ -2118,8 +2201,7 @@ class Engine:
             u, su = boxes[0], src_boxes[0]
             for b, sb in zip(boxes[1:], src_boxes[1:]):
                 u, su = box_union(u, b), box_union(su, sb)
-            pad_l, pad_t = max(0.0, su[0] - pb.box[0]) * k, max(0.0, su[1] - pb.box[1]) * k
-            pad_r, pad_b = max(0.0, pb.box[2] - su[2]) * k, max(0.0, pb.box[3] - su[3]) * k
+            pad_l, pad_t, pad_r, pad_b = panel_pads(pb.box, su, k, self.TW, self.TH)
             x0, y0 = max(0.0, u[0] - pad_l), max(0.0, u[1] - pad_t)
             x1, y1 = min(self.TW, u[2] + pad_r), min(self.TH, u[3] + pad_b)
             # a band that touched a canvas edge in the source keeps touching it
@@ -2195,6 +2277,9 @@ class Engine:
             raw["height"] = round(max(0.0, p.h), 2)
             if e.type == "text":
                 raw["font_size"] = int(max(1, p.fs if p.fs is not None else e.fs))
+            elif e.type == "shape" and _num(raw.get("corner_radius")) > 0 and e.w > 0 and e.h > 0:
+                # rounding scales with the shape, so a card stays a card, not a pill
+                raw["corner_radius"] = round(_num(raw["corner_radius"]) * min(p.w / e.w, p.h / e.h), 2)
             elements.append(raw)
         return {"canvas": {"width": int(round(self.TW)), "height": int(round(self.TH))}, "elements": elements}
 
