@@ -1162,6 +1162,7 @@ class Layouter:
         self.an = an
         self.ctx = ctx
         self.compact = False  # buttons trim their padding (~1.1 * fs) to fit a tight row
+        self.keep_pad = False  # a lifted label keeps the source padding (rows of chips that fit)
 
     # ---- leaves -------------------------------------------------------------
     def role_fmin(self, role: str, el: Optional[El] = None) -> int:
@@ -1249,7 +1250,7 @@ class Layouter:
         if s > k * 1.05:
             # label lifted to the floor: wrap the shape around the label instead
             # of scaling the whole shape up, so a tag never balloons
-            pad = max(0.7 * fs, source_pad * k)
+            pad = max(0.7 * fs, source_pad * (s if self.keep_pad else k))
             shape_w = lw + 2 * pad
             shape_h = min(shape_h, max(sh.h * k, 2 * fs))
         else:
@@ -1402,6 +1403,7 @@ class Layouter:
         if total_w > max_w * 1.001 and len(kids) > 1:
             if self.compact or not any(b.kind == "button" for b in node.blocks()):
                 return self.plan_wrapped_row(node, k, max_w, max_h)
+            natural = done
             self.compact = True  # trim button padding before wrapping the row
             try:
                 done, total_w = self._plan_row_children(node, k, max_w, max_h, packed, gaps)
@@ -1409,6 +1411,17 @@ class Layouter:
                 self.compact = False
             if total_w > max_w * 1.001:
                 return self.plan_wrapped_row(node, k, max_w, max_h)
+            total_w += self._give_back_padding(kids, natural, done, 0.85 * (max_w - total_w))
+        elif not self.compact and len(kids) > 1 and all(c.is_leaf and c.block.kind == "button" for c in kids):
+            # a row of chips keeps its source padding when that still fits, so
+            # the chips stay evenly weighted instead of shrink-wrapped
+            self.keep_pad = True
+            try:
+                roomy, roomy_w = self._plan_row_children(node, k, max_w, max_h, packed, gaps)
+            finally:
+                self.keep_pad = False
+            if roomy_w <= max_w:
+                done, total_w = roomy, roomy_w
         h = max(p.h for p in done)
         out = Plan(w=total_w, h=h, penalty=sum(p.penalty for p in done))
         x = 0.0
@@ -1422,6 +1435,31 @@ class Layouter:
             out.children.append((x, y, p))
             x += p.w + (gaps[i] if i < len(gaps) else 0.0)
         return out
+
+    @staticmethod
+    def _give_back_padding(kids: list[Node], natural: list[Plan], compact: list[Plan], slack: float) -> float:
+        """Compact padding trims every button to ~1.1 * fs; hand the row's
+        leftover width back so the buttons only lose the padding they must.
+        Returns the width added."""
+        lost = []
+        for c, n, p in zip(kids, natural, compact):
+            ok = c.is_leaf and c.block.kind == "button" and p.leaf is not None and n.leaf is not None
+            lost.append(max(0.0, n.leaf.shape_w - p.leaf.shape_w) if ok else 0.0)
+        tot = sum(lost)
+        if tot <= 0 or slack <= 0:
+            return 0.0
+        r = min(1.0, slack / tot)
+        added = 0.0
+        for c, p, d in zip(kids, compact, lost):
+            if d <= 0:
+                continue
+            lp = p.leaf
+            lp.shape_w += d * r
+            aw, ah = rot_aabb_dims(lp.shape_w, lp.shape_h, c.block.shape.rot)
+            added += aw - lp.w
+            lp.w, lp.h = aw, ah
+            p.w, p.h = aw, ah
+        return added
 
     def _plan_row_children(self, node: Node, k: float, max_w: float, max_h: float, packed: bool,
                            gaps: list[float]) -> tuple[list[Plan], float]:
@@ -1926,8 +1964,20 @@ class Engine:
         if p.wrapped or p.w > avail_w + 0.5 or len(p.children) != len(ln.children):
             return p
         sizes = [cp.w for _, _, cp in p.children]
-        desired = [c.cx / self.an.W * avail_w for c in ln.children]
-        starts = solve_1d(desired, sizes, L.node_gaps(ln, k), 0.0, avail_w)
+        if all(c.is_leaf and c.block.kind == "button" for c in ln.children):
+            # a row of chips: equal gaps across the row's source span, so the
+            # chips read as an evenly spaced set whatever their label widths
+            span = min(avail_w, max(sum(sizes), ln.w / self.an.W * avail_w))
+            gap = max(min(L.node_gaps(ln, k)), (span - sum(sizes)) / max(1, len(sizes) - 1))
+            total = sum(sizes) + gap * (len(sizes) - 1)
+            x0 = clamp(ln.cx / self.an.W * avail_w - total / 2, 0.0, max(0.0, avail_w - total))
+            starts = []
+            for sz in sizes:
+                starts.append(x0)
+                x0 += sz + gap
+        else:
+            desired = [c.cx / self.an.W * avail_w for c in ln.children]
+            starts = solve_1d(desired, sizes, L.node_gaps(ln, k), 0.0, avail_w)
         p.children = [(sx, dy, cp) for (_, dy, cp), sx in zip(p.children, starts)]
         p.w = avail_w
         return p
