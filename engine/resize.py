@@ -1332,8 +1332,11 @@ class Layouter:
         align = self._column_align(node) if node.synthetic else None
         y = 0.0
         for i, (c, p) in enumerate(zip(node.children, plans)):
-            if align == "left":
+            side = self._stamp_side(c) if node.synthetic else None
+            if side == "left" or (side is None and align == "left"):
                 x = 0.0
+            elif side == "right":
+                x = w - p.w
             elif align == "right":
                 x = w - p.w
             elif align == "center":
@@ -1345,6 +1348,18 @@ class Layouter:
             out.children.append((x, y, p))
             y += p.h + (gaps[i] if i < len(gaps) else 0.0)
         return out
+
+    def _stamp_side(self, c: Node) -> Optional[str]:
+        """A small stamp keeps the side of the canvas it sat on in the source
+        (a bottom-right seal stays right) instead of the column's alignment."""
+        if not c.is_leaf or c.block.role != "stamp":
+            return None
+        rel = c.cx / max(self.ctx.W, 1e-6)
+        if rel > 0.6:
+            return "right"
+        if rel < 0.4:
+            return "left"
+        return None
 
     def _column_align(self, node: Node) -> str:
         """One alignment for every child of an engine-built column, read from
