@@ -1321,17 +1321,61 @@ class Layouter:
     def plan_stack(self, node: Node, k: float, max_w: float, max_h: float, packed: bool) -> Plan:
         gaps = self.node_gaps(node, k)
         plans = [self.plan(c, k, max_w, max_h, packed) for c in node.children]
+        if node.synthetic:
+            self._restack_small_row(node, plans, gaps, k, max_w, max_h, packed)
         w = max(p.w for p in plans)
         h = sum(p.h for p in plans) + sum(gaps)
         out = Plan(w=w, h=h, penalty=sum(p.penalty for p in plans))
+        align = self._column_align(node) if node.synthetic else None
         y = 0.0
         for i, (c, p) in enumerate(zip(node.children, plans)):
-            nw = max(node.w, 1e-6)
-            x = _anchor_offset((c.box[0] - node.box[0]) / nw, (node.box[2] - c.box[2]) / nw,
-                               (c.cx - node.box[0]) / nw, w, p.w)
+            if align == "left":
+                x = 0.0
+            elif align == "right":
+                x = w - p.w
+            elif align == "center":
+                x = (w - p.w) / 2
+            else:
+                nw = max(node.w, 1e-6)
+                x = _anchor_offset((c.box[0] - node.box[0]) / nw, (node.box[2] - c.box[2]) / nw,
+                                   (c.cx - node.box[0]) / nw, w, p.w)
             out.children.append((x, y, p))
             y += p.h + (gaps[i] if i < len(gaps) else 0.0)
         return out
+
+    def _column_align(self, node: Node) -> str:
+        """One alignment for every child of an engine-built column, read from
+        how the children line up in the source."""
+        tol = 0.04 * self.ctx.W
+        kids = node.children
+
+        def spread(vals: list[float]) -> float:
+            return max(vals) - min(vals)
+        if spread([c.cx for c in kids]) <= tol:
+            return "center"
+        if spread([c.box[0] for c in kids]) <= tol:
+            return "left"
+        if spread([c.box[2] for c in kids]) <= tol:
+            return "right"
+        return "center"
+
+    def _restack_small_row(self, node: Node, plans: list[Plan], gaps: list[float], k: float,
+                           max_w: float, max_h: float, packed: bool) -> None:
+        """In an engine-built column, a row of a few small non-text items (logo
+        + sticker) that sets the column width is stacked instead when that is
+        narrower and the column still fits, so the column is not wide and empty."""
+        cA = self.ctx.W * self.ctx.H
+        widest = max(range(len(plans)), key=lambda i: plans[i].w)
+        c = node.children[widest]
+        if c.is_leaf or c.axis != "h" or len(c.children) > 4:
+            return
+        if not all(ch.is_leaf and ch.block.kind != "text" and box_area(ch.box) < 0.06 * cA for ch in c.children):
+            return
+        stack = Node(axis="v", children=list(c.children), box=c.box, synthetic=True)
+        sp = self.plan(stack, k, max_w, max_h, packed)
+        h = sum(p.h for p in plans) + sum(gaps) - plans[widest].h + sp.h
+        if sp.w < plans[widest].w and h <= max_h:
+            plans[widest] = sp
 
     def plan_row(self, node: Node, k: float, max_w: float, max_h: float, packed: bool = False) -> Plan:
         gaps = self.node_gaps(node, k, packed)
