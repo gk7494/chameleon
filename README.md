@@ -69,9 +69,10 @@ that structure out again, instead of scaling a picture.
    reading order.
 4. **Re-orient.** Tall targets are laid out as a vertical stack of the tree's
    rows; wide targets (≥ 1.3 : 1) as a horizontal flow of its columns;
-   near-square targets (0.8–1.3) try both and keep the side-by-side flow only
-   when it fits, keeps text as legible, holds the same readability floor and
-   beats the stack's score by a margin.
+   near-square targets (0.8–1.3) try both and keep the one that fits, keeps
+   text legible and holds the higher readability floor; on a tie, leaving the
+   source's own orientation (stack for portrait or square designs, flow for
+   landscape ones) must win the score by 0.3.
    When the axis flips, consecutive text rows merge into one text column, legal
    lines become a footer strip, rows of an image grid become one strip of
    cells, and the lanes can be grouped into 2–3 columns (every consecutive

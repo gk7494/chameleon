@@ -1737,6 +1737,9 @@ class Engine:
             modes = [self.mode]
             if self.NEAR_SQUARE[0] <= ar < self.NEAR_SQUARE[1]:
                 modes.append("h" if self.mode == "v" else "v")
+            # the orientation the source itself reads in: a portrait or square
+            # design is a stack, a landscape one a side-by-side flow
+            src_mode = "h" if an.W / an.H >= 1.3 else "v"
             best = None
             for mode in modes:
                 self.mode = mode
@@ -1744,7 +1747,7 @@ class Engine:
                 root = build_tree(self._top_level_nodes(), an.W, an.H)
                 root, lanes, footer = self.lanes(root)
                 score, feasible = self._layout_flow(root, lanes, footer)
-                if mode != modes[0]:
+                if len(modes) > 1 and mode != src_mode:
                     score -= self.MODE_SWITCH_MARGIN
                 # fit first, then text that stays legible, then the readability
                 # floor held, then the score
@@ -1857,7 +1860,7 @@ class Engine:
     FLOOR_LADDER = (8.5, 7.0, 5.5)
     # aspect ratios (w / h) where both a stack and a side-by-side flow are tried
     NEAR_SQUARE = (0.8, 1.3)
-    MODE_SWITCH_MARGIN = 0.1  # the other mode must clearly win to override the default
+    MODE_SWITCH_MARGIN = 0.3  # leaving the source's own orientation must clearly win
 
     def _layout_flow(self, root: Node, lanes: list[Node], footer: list[Node]) -> tuple[float, bool]:
         """Search the scale at the top readability floor; only if nothing fits
