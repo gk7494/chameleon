@@ -4,7 +4,7 @@ A deterministic, offline layout engine for the Adobe University Hackathon
 "Chameleon" challenge. It takes a design (`canvas` + `elements`) and a target
 canvas size and returns the **same elements, re-laid-out** for the new shape.
 No pixels are generated or redrawn; no copy is rewritten; font families are
-untouched. Everything happens in `engine/resize.py` (pure Python, ~2 000 lines,
+untouched. Everything happens in `engine/resize.py` (pure Python, ~2 300 lines,
 no models, no network).
 
 ## Running it
@@ -25,12 +25,17 @@ docker run --rm --network none \
 
 No new dependencies were added to the starter kit, and `Dockerfile` /
 `requirements.txt` are byte-identical to the upstream starter. The image was
-built and run with the two commands above (`--network none`), and the
-container's output is byte-identical to a local run. The engine measures text
+built and run with the two commands above (`--network none`). The container
+is the reference: skia's glyph advances differ slightly between platforms (a
+40 px bold headline measures 755.0 px in the image and 756.7 px on macOS), so
+a local macOS run can place some boxes a few pixels differently from the
+container. The engine measures text
 with the same skia glyph advances and the same greedy wrap the renderer uses
 (it falls back to Pillow, then to a width table, if fonts are missing), so the
 line breaks it plans are the line breaks that get rendered. One task takes
-0.005–0.12 s on a laptop (about 0.04 s on average across the stress-test formats); the engine also runs under Python 3.11 (the image's
+0.005–0.45 s on a laptop (about 0.05 s on average across the stress-test
+formats; the slowest adversarial case, 24 extra text boxes in a wide banner,
+takes about 1 s); the engine also runs under Python 3.11 (the image's
 interpreter) and 3.13.
 
 ## How it works
@@ -47,9 +52,10 @@ that structure out again, instead of scaling a picture.
    * *decorative* – low-opacity shapes, shapes bleeding off the canvas, large
      empty shapes → kept at the same relative spot, scaled, clamped on-canvas;
    * *panel* – an opaque shape holding several things → its children are kept
-     together as one unit of the layout tree, and the panel is re-wrapped
-     around them afterwards (keeping the source padding, and the canvas edges
-     it touched);
+     together as one unit of the layout tree, laid out inset by the panel's
+     padding (source padding × k, capped at 4 % of the shorter side), and the
+     panel is re-wrapped around them afterwards, so a card never covers the
+     logo or fine print beside it (it keeps the canvas edges it touched);
    * *flow block* – everything else. Implicit groups are detected from
      geometry: a small shape holding exactly one text is a **button**, text
      sitting fully on an image is an **overlay**, and `group_id` is always
@@ -61,20 +67,44 @@ that structure out again, instead of scaling a picture.
    order and "these three badges are one row" / "this caption belongs to this
    thumbnail" survive. Elements that truly overlap in the source are read in
    reading order.
-4. **Re-orient.** Tall and square targets are laid out as a vertical stack of
-   the tree's rows; wide targets as a horizontal flow of its columns.
+4. **Re-orient.** Tall targets are laid out as a vertical stack of the tree's
+   rows; wide targets (≥ 1.3 : 1) as a horizontal flow of its columns;
+   near-square targets (0.8–1.3) try both and keep the side-by-side flow only
+   when it fits, keeps text as legible, holds the same readability floor and
+   beats the stack's score by a margin.
    When the axis flips, consecutive text rows merge into one text column, legal
-   lines become a footer strip, a row of small items (badge + logo) may stack,
-   and the lanes can be grouped into 2–3 columns (every consecutive grouping is
-   tried and scored) — this is what turns a poster into a two-column banner.
+   lines become a footer strip, rows of an image grid become one strip of
+   cells, and the lanes can be grouped into 2–3 columns (every consecutive
+   grouping is tried and scored) — this is what turns a poster into a
+   two-column banner. In an engine-built column every child takes one
+   alignment read from the source (centres, else left edges, else right
+   edges), small stamps keep the side they sat on, and a logo + sticker row
+   that would make the column wide and empty is stacked instead. A card that
+   does not fit stacked may lay its contents out side by side (picture | rest)
+   as long as no text drops below its floor.
 5. **Scale.** A single global scale `k` is searched over 56 log-spaced
    candidates, then refined by bisection. Every candidate is fully laid out,
    checked for fit, and scored: `log k` rewards size; extra line-wraps, fonts
    pushed under a readability floor, wrapped rows, unbalanced columns and
-   over-filled canvases are penalised. Text may rewrap, rows may flex-wrap,
-   images shrink individually only when they would not fit, and logos / hero
-   images / legal text have floors so brand elements never vanish in extreme
-   formats.
+   over-filled canvases are penalised. Text may rewrap (and widens to its lane
+   rather than wrap more than the source did), rows may flex-wrap, images
+   shrink individually only when they would not fit, and logos / hero images /
+   legal text have floors so brand elements never vanish in extreme formats.
+   * *Readability floor.* Text never goes below `max(10 px, 0.85 % of the long
+     side)` (legal × 0.7, kickers and badges × 0.8). Text bigger than the body
+     copy gets a proportionally higher floor (up to 2×, by √ of the size
+     ratio), so the hierarchy survives when everything is on the floor. Only
+     when nothing fits at that floor does the engine step down a ladder
+     (8.5 → 7 → 5.5 px), charging each step, and non-logo image floors relax
+     with it.
+   * *Buttons and chips.* A label lifted to the floor no longer scales its
+     whole shape: the shape wraps the label with modest padding, so a tag
+     never balloons past the logo. A row of buttons that does not fit first
+     trims padding (~1.1 × font size), handing back whatever width is left;
+     a row of chips that fits keeps its source padding and is spaced evenly.
+   * *Hero growth.* After `k` is chosen, the hero image may grow (up to 2×)
+     while the layout stays feasible, the score holds and the hero covers at
+     most ~62 % of the canvas.
 6. **Position.** When the main axis is unchanged (tall→tall or wide→wide),
    each lane keeps its proportional position from the source and a 1-D solver
    enforces order, minimum gaps and bounds — so a logo stays far left, a CTA
@@ -93,7 +123,8 @@ that structure out again, instead of scaling a picture.
    pass guarantees every element is inside the canvas (a uniform squeeze about
    the centre if something had to overflow). Image boxes keep their aspect
    ratio exactly; text boxes get integer font sizes; ids, count and every
-   other field are passed through unchanged.
+   other field are passed through unchanged, except that a shape's
+   `corner_radius` scales with it (so a card stays a card on a small format).
 
 If structural analysis ever raises, `resize()` falls back to anchored uniform
 scaling and still returns a valid document.
@@ -124,23 +155,27 @@ scaling and still returns a valid document.
 
 ```bash
 python -m tools.stress_test          # renders contact sheets to output/stress/
-python -m tools.stress_test --quick  # structure checks only, ~15 s
+python -m tools.stress_test --quick  # structure checks only, ~20 s
+python -m tools.make_test_assets     # regenerates tools/test_assets/*.png
 ```
 
-The stress test takes every `input/*.json` design through thirteen real
+The stress test takes every `input/*.json` design, plus four extra designs in
+`tools/designs/` (left-aligned copy beside a product, text over a photo
+background with a busy half, a 2×2 image grid with captions, a story with a
+product card panel; their images are generated by `tools/make_test_assets.py`
+and are not shipped in the image), through thirteen real
 formats (story, square, 4:5, 1200×628, 1280×720, 1920×1080, 160×600, 300×250,
 728×90, 2560×1440, 820×312, 1500×500, 1000×1500) and checks ids, required
 fields, bounds, image proportions, integer font sizes, unchanged copy/fonts,
-and that no two separate layout blocks overlap. It then runs an adversarial
+that no two separate layout blocks overlap, and that a panel never covers a
+block outside it. Every contact sheet starts with the source design. It then
+runs an adversarial
 battery (missing asset, rotated element, 140-character headline, empty text,
 one unbreakable word, explicit newlines, letter spacing, unknown font,
 font_size 0.5, no z-index, zero-size element, translucent veil, bottom band
 panel, 24 extra text boxes, 1×1 / 4000×4000 / 3000×100 / 100×3000 targets).
 
-During development the same checks were also run on four synthetic designs
-with different structures (a wide banner, a card with a panel and divider, an
-image grid with captions and an overlay title, a right-aligned
-multi-paragraph layout with a three-element group): all 91 layouts pass with
-zero unintended overlaps, and the background-aware pass was verified on
-half-busy test backgrounds (text relocates to the calm half in tall, square
-and wide targets).
+All 91 format layouts and 22 adversarial cases pass. Known limitation: on a
+photo background in very wide formats (820×312, 1500×500, 728×90) the content
+spans the full width, so the background-aware nudge has no room to move the
+headline off the busy half of the picture.
